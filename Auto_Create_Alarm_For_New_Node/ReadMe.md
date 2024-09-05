@@ -69,12 +69,21 @@ aws lambda create-function \
 ```
 
 
-## Create a subscription filter using the following command
+## Create Event Bridge Rule
+
+![image](https://github.com/user-attachments/assets/662422e0-f6a0-462a-8df8-9b9ebf8d137d)
+
+Event Pattern
 ```
-aws logs put-subscription-filter \
-    --log-group-name "<EKS-Audit-Log-Name>" \
-    --filter-name New-Node-Join-EKS-Cluster \
-    --filter-pattern "{ ($.apiVersion = \"audit.k8s.io/v1\") && ($.verb = \"patch\") &&($.objectRef.resource = \"nodes\") &&($.objectRef.subresource = \"status\") && ($.requestObject.status.conditions[3].type =  \"Ready\") &&  ($.requestObject.status.conditions[3].status =  \"True\")}" \
-    --destination-arn arn:aws:lambda:<your-region>:<your-account-id>:function:Create-EKS-New-Node-Alarm \
-    --region <your-region>
+{
+  "source": ["aws.ec2"],
+  "detail-type": ["EC2 Instance State-change Notification"],
+  "detail": {
+    "state": ["shutting-down", "pending"]
+  }
+}
 ```
+
+![image](https://github.com/user-attachments/assets/848acebe-5689-4e50-a9e2-b227e7e5014a)
+
+

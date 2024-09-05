@@ -60,23 +60,11 @@ filter_name修改为cloudwatch log 中的subscription filter name，这里为New
 Lambda Function中的Timeout可根据实际情况调大
 ```
 aws lambda create-function \
-    --function-name Create-EKS-New-Node-Alarm \
+    --function-name Auto-Create-Delete-Instance-Alarm \
     --zip-file fileb://<file-path>/Create-EKS-Node-Alarm.zip \
-    --role arn:aws:iam::<your-account>:role/Lambda-EKS-Node-Alarm-Role \
+    --role arn:aws:iam::<your-account>:role/Lambda-Create-Instance-Alarm-Role \
     --handler lambda_function.lambda_handler \
     --runtime python3.10 \
-    --region <your-region>
-```
-
-## Grant CloudWatch Logs the permission to execute your function
-```
-aws lambda add-permission \
-    --function-name "Create-EKS-New-Node-Alarm" \
-    --statement-id "Create-EKS-New-Node-Alarm" \
-    --principal "logs.amazonaws.com" \
-    --action "lambda:InvokeFunction" \
-    --source-arn "<EKS-Audit-Log-ARN> \
-    --source-account "<your-account>" \
     --region <your-region>
 ```
 

@@ -3,7 +3,7 @@ AWS instance级别的告警可以触发多种action，比如：auto-recovery,aut
 
 
 ## Create IAM Policy 
-Policy Nmae: Lambda-EKS-Node-Alarm-Policy
+Policy Nmae: Lambda-Create-Instance-Alarm-Policy
 ```
 {
     "Version": "2012-10-17",
@@ -11,14 +11,29 @@ Policy Nmae: Lambda-EKS-Node-Alarm-Policy
         {
             "Sid": "VisualEditor0",
             "Effect": "Allow",
-            "Action": "cloudwatch:PutMetricAlarm",
+            "Action": [
+                "cloudwatch:PutMetricAlarm",
+                "ec2:DescribeInstances",
+                "cloudwatch:DeleteAlarms",
+                "cloudwatch:DescribeAlarmsForMetric",
+                "cloudwatch:DescribeAlarms"
+            ],
             "Resource": "*"
         },
         {
             "Sid": "VisualEditor1",
             "Effect": "Allow",
-            "Action": ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents"],
-            "Resource": "*"
+            "Action": "logs:CreateLogGroup",
+            "Resource": "arn:aws:logs:us-west-2:887221633712:*"
+        },
+        {
+            "Sid": "VisualEditor2",
+            "Effect": "Allow",
+            "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents"
+            ],
+            "Resource": "arn:aws:logs:us-west-2:887221633712:log-group:/aws/lambda/filter-ec2-trigger-alarm:*"
         }
     ]
 }

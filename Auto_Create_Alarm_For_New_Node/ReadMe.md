@@ -33,7 +33,7 @@ Policy Nmae: Lambda-Create-Instance-Alarm-Policy
                 "logs:CreateLogStream",
                 "logs:PutLogEvents"
             ],
-            "Resource": "arn:aws:logs:us-west-2:887221633712:log-group:/aws/lambda/filter-ec2-trigger-alarm:*"
+            "Resource": "arn:aws:logs:us-west-2:887221633712:log-group:/aws/lambda/Auto-Create-Delete-Instance-Alarm:*"
         }
     ]
 }

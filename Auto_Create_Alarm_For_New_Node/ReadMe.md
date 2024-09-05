@@ -46,7 +46,7 @@ Role Name: Lambda-Create-Instance-Alarm-Role
 ![image](https://github.com/user-attachments/assets/8977d18a-e938-49e7-8038-4ede1e021fa1)
 
 
-## customize Python Code
+## Customize Python Code
 代码中的region配置为您实际的region name
 
 filter_name修改为cloudwatch log 中的subscription filter name，这里为New-Node-Join-EKS-Cluster

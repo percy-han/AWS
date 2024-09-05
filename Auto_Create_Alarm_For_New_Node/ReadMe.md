@@ -47,13 +47,11 @@ Role Name: Lambda-Create-Instance-Alarm-Role
 
 
 ## Customize Python Code
-代码中的region配置为您实际的region name
+代码中的region配置为您实际的region name，sns替换为您实际的arn
 
-filter_name修改为cloudwatch log 中的subscription filter name，这里为New-Node-Join-EKS-Cluster
+如果想触发更多action，可以在alarmAction list中添加
 
-如果想触发更多action，可以在AlarmActions部分进行添加
-
-将代码压缩成gzip文件，这里用的文件名为Create-EKS-Node-Alarm.zip
+将代码压缩成gzip文件，这里用的文件名为Auto-Create-Delete-Instance-Alarm.zip
 
 ## Create Lambda Function
 

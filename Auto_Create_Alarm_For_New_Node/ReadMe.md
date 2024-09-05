@@ -40,7 +40,7 @@ Policy Nmae: Lambda-Create-Instance-Alarm-Policy
 ```
 
 ## Create IAM Role 
-Role Name: Lambda-EKS-Node-Alarm-Role
+Role Name: Lambda-Create-Instance-Alarm-Role
 ![image](https://github.com/user-attachments/assets/64b99973-955c-4e36-aaa6-bfd3e3501f7c)
 
 ![image](https://github.com/user-attachments/assets/41c00fdd-198e-4c1e-a3ad-08cb4dba5775)

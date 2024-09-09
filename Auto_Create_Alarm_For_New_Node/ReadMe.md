@@ -6,6 +6,9 @@ AWS instance级别的告警可以触发多种action，比如：auto-recovery,aut
 
 EventBridge监控EC2实例的状态，过滤实例启动和销毁事件来触发Lambda，Lambda通过describe_instances获取的实例tag来区分workload。根据实际需求对不同workload配置不同的alarm action。cloudwatch log中记录了lambda执行的日志，可用于故障排查
 
+## Limition
+结合生产环境的实际实例波动情况，需要调整Lambda的并发的quota数量
+
 ## Create IAM Policy 
 Policy Nmae: Lambda-Create-Instance-Alarm-Policy
 ```

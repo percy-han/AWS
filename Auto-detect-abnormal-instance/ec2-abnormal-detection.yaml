@@ -1,0 +1,880 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EC2 Abnormal Instance Auto Detection System - Support Custom Resource Name Prefix'
+
+Parameters:
+  ResourcePrefix:
+    Type: String
+    Description: 'Resource name prefix to distinguish different environments or projects'
+    Default: 'ec2-detection'
+    AllowedPattern: '^[a-zA-Z0-9-]+$'
+    ConstraintDescription: 'Can only contain letters, numbers and hyphens'
+    MinLength: 3
+    MaxLength: 30
+
+  Environment:
+    Type: String
+    Description: 'Deployment environment'
+    Default: 'prod'
+    AllowedValues:
+      - 'dev'
+      - 'test'
+      - 'staging'
+      - 'prod'
+
+  TimezoneOffset:
+    Type: Number
+    Description: 'Timezone offset from UTC (e.g., 8 for UTC+8, -5 for UTC-5)'
+    Default: 0
+    MinValue: -12
+    MaxValue: 14
+    ConstraintDescription: 'Must be between -12 and +14'
+
+  ScheduleExpression:
+    Type: String
+    Description: 'EventBridge schedule expression for Lambda execution'
+    Default: 'rate(5 minutes)'
+    AllowedValues:
+      - 'rate(1 minute)'
+      - 'rate(5 minutes)'
+      - 'rate(10 minutes)'
+      - 'rate(15 minutes)'
+      - 'rate(30 minutes)'
+      - 'rate(1 hour)'
+
+  LambdaMemorySize:
+    Type: Number
+    Description: 'Lambda function memory size in MB'
+    Default: 256
+    MinValue: 128
+    MaxValue: 3008
+
+  LambdaTimeout:
+    Type: Number
+    Description: 'Lambda function timeout in seconds'
+    Default: 300
+    MinValue: 30
+    MaxValue: 900
+
+  LogRetentionDays:
+    Type: Number
+    Description: 'CloudWatch logs retention period in days'
+    Default: 30
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1827, 3653]
+
+  CreateNewSQS:
+    Type: String
+    Description: 'Whether to create a new SQS queue or use existing one'
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+  ExistingSQSArn:
+    Type: String
+    Description: 'ARN of existing SQS queue (required if CreateNewSQS is false)'
+    Default: ''
+
+Conditions:
+  ShouldCreateSQS: !Equals [!Ref CreateNewSQS, 'true']
+
+Resources:
+  # DynamoDB Table - Store abnormal instance records
+  AbnormalInstancesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ResourcePrefix}-abnormal-instances-${Environment}'
+      AttributeDefinitions:
+        - AttributeName: InstanceId
+          AttributeType: S
+        - AttributeName: UniqueKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: InstanceId
+          KeyType: HASH
+        - AttributeName: UniqueKey
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-abnormal-instances-${Environment}'
+        - Key: Purpose
+          Value: EC2AbnormalInstanceDetection
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: CloudFormation
+        - Key: Project
+          Value: !Ref ResourcePrefix
+
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-lambda-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Description: !Sub 'Lambda execution role for ${ResourcePrefix} EC2 abnormal instance detection'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: !Sub '${ResourcePrefix}-detection-policy-${Environment}'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # CloudWatch Logs permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ResourcePrefix}-*'
+              # EC2 permissions
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:DescribeInstanceStatus
+                Resource: '*'
+              # CloudWatch permissions
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                Resource: '*'
+              # DynamoDB permissions
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource: !GetAtt AbnormalInstancesTable.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-lambda-role-${Environment}'
+        - Key: Purpose
+          Value: EC2AbnormalInstanceDetection
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ResourcePrefix
+
+  # Lambda Function - Inline code version
+  DetectionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ResourcePrefix}-detection-lambda-${Environment}'
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: !Ref LambdaTimeout
+      MemorySize: !Ref LambdaMemorySize
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Description: !Sub '${ResourcePrefix} EC2 abnormal instance auto detection tool - ${Environment} environment'
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref AbnormalInstancesTable
+          ENVIRONMENT: !Ref Environment
+          PROJECT_PREFIX: !Ref ResourcePrefix
+          DEPLOYMENT_REGION: !Ref AWS::Region
+          TIMEZONE_OFFSET: !Ref TimezoneOffset
+      Code:
+        ZipFile: !Sub |
+          import boto3
+          import json
+          import logging
+          import os
+          from datetime import datetime, timedelta, timezone
+          from botocore.exceptions import ClientError
+          import botocore
+          import re
+
+          # Lambda环境下的日志配置
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          # AWS官方推荐的自动重试配置
+          RETRY_CONFIG = botocore.config.Config(
+              retries={
+                  'max_attempts': 10,
+                  'mode': 'standard'
+              }
+          )
+
+          # 从环境变量获取配置
+          DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME', 'abnormal-instances')
+          ENVIRONMENT = os.environ.get('ENVIRONMENT', 'prod')
+          PROJECT_PREFIX = os.environ.get('PROJECT_PREFIX', 'ec2-detection')
+          DEPLOYMENT_REGION = os.environ.get('DEPLOYMENT_REGION', 'us-east-1')
+          TIMEZONE_OFFSET = int(os.environ.get('TIMEZONE_OFFSET', '0'))
+
+          def get_local_time_from_utc(utc_dt):
+              """将UTC时间转换为指定时区的本地时间"""
+              if isinstance(utc_dt, str):
+                  utc_dt = datetime.strptime(utc_dt, '%Y-%m-%dT%H:%M:%S.%fZ')
+              
+              # 添加时区偏移
+              local_dt = utc_dt + timedelta(hours=TIMEZONE_OFFSET)
+              return local_dt.strftime('%Y-%m-%d %H:%M')
+
+          def get_current_local_time():
+              """获取当前的本地时间字符串"""
+              current_time_utc = datetime.now(timezone.utc)
+              local_time = current_time_utc + timedelta(hours=TIMEZONE_OFFSET)
+              return local_time.strftime('%Y-%m-%d %H:%M:%S')
+
+          def get_impaired_since_from_details(details, name=None):
+              """从状态详情中提取故障开始时间，返回本地时区时间"""
+              for d in details:
+                  if d['Status'] == 'failed' and (name is None or d['Name'] == name):
+                      impaired_since = d.get('ImpairedSince')
+                      if impaired_since:
+                          return get_local_time_from_utc(impaired_since)
+              return ''
+
+          def sanitize_metric_id(volume_id, metric_suffix):
+              """清理和格式化CloudWatch指标ID，确保符合AWS要求"""
+              # 移除卷ID中的连字符，并确保以小写字母开头
+              clean_volume_id = re.sub(r'[^a-zA-Z0-9]', '', volume_id)
+              # 确保以小写字母开头
+              if clean_volume_id and clean_volume_id[0].isdigit():
+                  clean_volume_id = 'v' + clean_volume_id
+              elif not clean_volume_id:
+                  clean_volume_id = 'vol'
+              
+              # 构建符合要求的ID: 小写字母开头，只包含字母、数字和下划线
+              metric_id = f"{metric_suffix.lower()}_{clean_volume_id.lower()}"
+              
+              # 确保ID符合正则表达式 ^[a-z][a-zA-Z0-9_]*$
+              metric_id = re.sub(r'[^a-zA-Z0-9_]', '', metric_id)
+              if not metric_id or not metric_id[0].islower():
+                  metric_id = 'metric_' + metric_id
+              
+              return metric_id
+
+          def batch_get_ebs_cloudwatch_metrics(cloudwatch_client, volume_ids, instance_id, max_retries=3, sleep_base=1):
+              """批量查询多个EBS卷的多个CloudWatch指标"""
+              if not volume_ids:
+                  return {}
+                  
+              metrics = [
+                  ('VolumeThroughputExceededCheck', 'EBS_Throughput_Exceeded'),
+                  ('VolumeIOPSExceededCheck', 'EBS_IOPS_Exceeded')
+              ]
+              
+              metric_queries = []
+              id_to_vid_key = {}
+              
+              for vid in volume_ids:
+                  for metric, out_key in metrics:
+                      # 使用新的ID清理函数
+                      qid = sanitize_metric_id(vid, out_key)
+                      
+                      metric_queries.append({
+                          'Id': qid,
+                          'MetricStat': {
+                              'Metric': {
+                                  'Namespace': 'AWS/EBS',
+                                  'MetricName': metric,
+                                  'Dimensions': [
+                                      {'Name': 'VolumeId', 'Value': vid},
+                                      {'Name': 'InstanceId', 'Value': instance_id}
+                                  ]
+                              },
+                              'Period': 60,
+                              'Stat': 'Maximum'
+                          },
+                          'ReturnData': True
+                      })
+                      id_to_vid_key[qid] = (vid, out_key)
+              
+              results = {vid: {'EBS_IOPS_Exceeded': False, 'EBS_Throughput_Exceeded': False} for vid in volume_ids}
+              
+              # 分批处理，每批最多100个查询
+              for i in range(0, len(metric_queries), 100):
+                  batch = metric_queries[i:i+100]
+                  
+                  for attempt in range(max_retries):
+                      try:
+                          response = cloudwatch_client.get_metric_data(
+                              MetricDataQueries=batch,
+                              StartTime=datetime.now(timezone.utc) - timedelta(hours=1),
+                              EndTime=datetime.now(timezone.utc),
+                          )
+                          
+                          for md in response['MetricDataResults']:
+                              qid = md['Id']
+                              if qid in id_to_vid_key:
+                                  vid, out_key = id_to_vid_key[qid]
+                                  values = md.get('Values', [])
+                                  # 只要有一个点大于0就算异常
+                                  if any(v > 0 for v in values):
+                                      results[vid][out_key] = True
+                          break  # 成功则跳出重试
+                          
+                      except ClientError as e:
+                          if e.response['Error']['Code'] == 'Throttling':
+                              logger.warning(f"CloudWatch限流，重试第{attempt+1}次")
+                              import time
+                              time.sleep(sleep_base * (2 ** attempt))
+                          else:
+                              logger.error(f"CloudWatch批量查询失败: {e}")
+                              break
+                      except Exception as e:
+                          logger.error(f"CloudWatch批量查询发生未知错误: {e}")
+                          break
+              
+              return results
+
+          def get_instance_ebs_abnormal_json(ec2_client, cloudwatch_client, instance_id):
+              """获取实例EBS异常详情的JSON"""
+              try:
+                  resp = ec2_client.describe_instances(InstanceIds=[instance_id])
+                  volume_info = {}  # 存储卷ID到挂载点的映射
+                  
+                  for reservation in resp['Reservations']:
+                      for inst in reservation['Instances']:
+                          for bdm in inst.get('BlockDeviceMappings', []):
+                              if 'Ebs' in bdm:
+                                  volume_id = bdm['Ebs']['VolumeId']
+                                  device_name = bdm.get('DeviceName', 'Unknown')
+                                  volume_info[volume_id] = device_name
+                                  
+              except Exception as e:
+                  logger.error(f"获取实例{instance_id}的EBS卷失败: {e}")
+                  return ''
+              
+              if not volume_info:
+                  return ''
+              
+              volume_ids = list(volume_info.keys())
+              
+              # 批量查询
+              abnormal_flags_dict = batch_get_ebs_cloudwatch_metrics(cloudwatch_client, volume_ids, instance_id)
+              ebs_abnormal_list = []
+              
+              for vid in volume_ids:
+                  abnormal_flags = abnormal_flags_dict.get(vid, {
+                      'EBS_IOPS_Exceeded': False, 
+                      'EBS_Throughput_Exceeded': False
+                  })
+                  
+                  if abnormal_flags['EBS_IOPS_Exceeded'] or abnormal_flags['EBS_Throughput_Exceeded']:
+                      ebs_abnormal_list.append({
+                          'VolumeId': vid,
+                          'DeviceName': volume_info[vid],  # 添加挂载点信息
+                          'EBS_IOPS_Exceeded': abnormal_flags['EBS_IOPS_Exceeded'],
+                          'EBS_Throughput_Exceeded': abnormal_flags['EBS_Throughput_Exceeded']
+                      })
+              
+              if ebs_abnormal_list:
+                  return json.dumps(ebs_abnormal_list, ensure_ascii=False)
+              else:
+                  return ''
+
+          def get_instance_details(ec2_client, instance_id):
+              """获取实例的详细信息，包括主机名和私有IP"""
+              try:
+                  response = ec2_client.describe_instances(InstanceIds=[instance_id])
+                  for reservation in response['Reservations']:
+                      for instance in reservation['Instances']:
+                          # 获取主机名（从Tags中的Name标签）
+                          hostname = ''
+                          for tag in instance.get('Tags', []):
+                              if tag['Key'] == 'Name':
+                                  hostname = tag['Value']
+                                  break
+                          
+                          # 获取私有IP
+                          private_ip = instance.get('PrivateIpAddress', '')
+                          
+                          return hostname, private_ip
+              except Exception as e:
+                  logger.error(f"获取实例{instance_id}详细信息失败: {e}")
+                  return '', ''
+              
+              return '', ''
+
+          def get_impaired_instances(ec2_client, cloudwatch_client):
+              """获取所有impaired实例及其故障类型和时间"""
+              result = []
+              seen = set()
+              
+              filters_list = [
+                  ([{'Name': 'instance-status.status', 'Values': ['impaired']}], 'InstanceStatus'),
+                  ([{'Name': 'system-status.status', 'Values': ['impaired']}], 'SystemStatus'),
+              ]
+              
+              for filters, fault_type in filters_list:
+                  try:
+                      paginator = ec2_client.get_paginator('describe_instance_status')
+                      for page in paginator.paginate(Filters=filters, IncludeAllInstances=True):
+                          for status in page['InstanceStatuses']:
+                              instance_id = status['InstanceId']
+                              unique_key = (instance_id, fault_type)
+                              
+                              if unique_key in seen:
+                                  continue
+                              seen.add(unique_key)
+                              
+                              # 获取实例详细信息
+                              hostname, private_ip = get_instance_details(ec2_client, instance_id)
+                              
+                              if fault_type == 'InstanceStatus':
+                                  impaired_since = get_impaired_since_from_details(
+                                      status.get('InstanceStatus', {}).get('Details', [])
+                                  )
+                                  ebs_json = get_instance_ebs_abnormal_json(ec2_client, cloudwatch_client, instance_id)
+                                  
+                                  result.append({
+                                      'InstanceId': instance_id,
+                                      'Hostname': hostname,
+                                      'PrivateIP': private_ip,
+                                      'Fault_Type': fault_type,
+                                      'ImpairedSince': impaired_since,
+                                      'EBS_Detail_JSON': ebs_json
+                                  })
+                                  
+                              elif fault_type == 'SystemStatus':
+                                  impaired_since = get_impaired_since_from_details(
+                                      status.get('SystemStatus', {}).get('Details', [])
+                                  )
+                                  
+                                  result.append({
+                                      'InstanceId': instance_id,
+                                      'Hostname': hostname,
+                                      'PrivateIP': private_ip,
+                                      'Fault_Type': fault_type,
+                                      'ImpairedSince': impaired_since,
+                                      'EBS_Detail_JSON': ''
+                                  })
+                                  
+                  except Exception as e:
+                      logger.error(f"获取impaired实例时发生异常: {e}")
+              
+              return result
+
+          def save_to_dynamodb(data, table_name=DYNAMODB_TABLE_NAME):
+              """将数据保存到DynamoDB，实现去重功能"""
+              if not data:
+                  logger.info("没有数据需要保存到DynamoDB")
+                  return
+              
+              dynamodb = boto3.resource('dynamodb', region_name=DEPLOYMENT_REGION)
+              table = dynamodb.Table(table_name)
+              
+              # DetectionTime使用本地时区时间
+              current_time = get_current_local_time()
+              
+              saved_count = 0
+              skipped_count = 0
+              
+              logger.info("=" * 80)
+              logger.info("开始保存异常实例数据到DynamoDB")
+              logger.info("=" * 80)
+              
+              for item in data:
+                  instance_id = item['InstanceId']
+                  hostname = item.get('Hostname', '')
+                  private_ip = item.get('PrivateIP', '')
+                  fault_type = item['Fault_Type']
+                  impaired_since = item['ImpairedSince']        # 本地时区时间
+                  ebs_detail = item.get('EBS_Detail_JSON', '')
+                  
+                  # 创建唯一键：使用本地时区时间
+                  unique_key = f"{fault_type}#{impaired_since}"
+                  
+                  # 详细日志输出
+                  logger.info(f"处理异常实例:")
+                  logger.info(f"  实例ID: {instance_id}")
+                  logger.info(f"  主机名: {hostname if hostname else 'N/A'}")
+                  logger.info(f"  私有IP: {private_ip if private_ip else 'N/A'}")
+                  logger.info(f"  故障类型: {fault_type}")
+                  logger.info(f"  故障开始时间: {impaired_since if impaired_since else 'N/A'}")
+                  logger.info(f"  EBS详情: {ebs_detail if ebs_detail else 'N/A'}")
+                  logger.info(f"  唯一键: {unique_key}")
+                  
+                  try:
+                      # 使用条件表达式实现去重：只有当主键+排序键组合不存在时才插入
+                      table.put_item(
+                          Item={
+                              'InstanceId': instance_id,                    # 主键
+                              'UniqueKey': unique_key,                      # 排序键，用于唯一性约束
+                              'Hostname': hostname,                         # 主机名
+                              'PrivateIP': private_ip,                      # 私有IP
+                              'Fault_Type': fault_type,                     # 故障类型
+                              'ImpairedSince': impaired_since,              # 本地时区时间
+                              'DetectionTime': current_time,                # 检测时间(本地时区)
+                              'EBS_Detail_JSON': ebs_detail,                # EBS详情
+                              'Environment': ENVIRONMENT,                   # 环境标识
+                              'ProjectPrefix': PROJECT_PREFIX,              # 项目前缀
+                              'TimezoneOffset': TIMEZONE_OFFSET             # 时区偏移
+                          },
+                          ConditionExpression='attribute_not_exists(InstanceId) AND attribute_not_exists(UniqueKey)'
+                      )
+                      saved_count += 1
+                      logger.info(f"  ✅ 成功保存到DynamoDB")
+                      
+                  except ClientError as e:
+                      if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                          # 记录已存在，跳过
+                          skipped_count += 1
+                          logger.info(f"  ⚠️  记录已存在，跳过保存")
+                      else:
+                          logger.error(f"  ❌ 保存到DynamoDB失败: {e}")
+                  except Exception as e:
+                      logger.error(f"  ❌ 保存记录时发生未知错误: {e}")
+                  
+                  logger.info("-" * 60)
+              
+              logger.info("=" * 80)
+              logger.info(f"DynamoDB操作完成 - 新增: {saved_count}, 跳过重复: {skipped_count}")
+              logger.info("=" * 80)
+
+          def lambda_handler(event, context):
+              """Lambda函数入口点"""
+              try:
+                  timezone_str = f"UTC{'+' if TIMEZONE_OFFSET >= 0 else ''}{TIMEZONE_OFFSET}" if TIMEZONE_OFFSET != 0 else "UTC"
+                  logger.info(f"开始执行EC2异常实例检测 - 项目: {PROJECT_PREFIX}, 环境: {ENVIRONMENT}, 时区: {timezone_str}")
+                  
+                  # 使用当前部署的region
+                  region = DEPLOYMENT_REGION
+                  
+                  # 创建AWS客户端
+                  session = boto3.session.Session()
+                  ec2_client = session.client('ec2', region_name=region, config=RETRY_CONFIG)
+                  cloudwatch_client = session.client('cloudwatch', region_name=region, config=RETRY_CONFIG)
+                  
+                  logger.info(f"正在检测区域 {region} 的实例状态...")
+                  
+                  # 获取异常实例列表
+                  impaired_list = get_impaired_instances(ec2_client, cloudwatch_client)
+                  
+                  if not impaired_list:
+                      logger.info("未发现异常实例")
+                      return {
+                          'statusCode': 200,
+                          'body': json.dumps({
+                              'message': '未发现异常实例',
+                              'region': region,
+                              'environment': ENVIRONMENT,
+                              'project_prefix': PROJECT_PREFIX,
+                              'timezone_offset': TIMEZONE_OFFSET,
+                              'detection_time': get_current_local_time(),
+                              'abnormal_instances_count': 0
+                          })
+                      }
+                  
+                  logger.info(f"本次发现异常实例数量: {len(impaired_list)}")
+                  
+                  # 记录发现的异常实例详情
+                  logger.info("=" * 80)
+                  logger.info("发现的异常实例详情:")
+                  logger.info("=" * 80)
+                  
+                  for i, item in enumerate(impaired_list, 1):
+                      logger.info(f"异常实例 #{i}:")
+                      logger.info(f"  实例ID: {item['InstanceId']}")
+                      logger.info(f"  主机名: {item.get('Hostname', 'N/A')}")
+                      logger.info(f"  私有IP: {item.get('PrivateIP', 'N/A')}")
+                      logger.info(f"  故障类型: {item['Fault_Type']}")
+                      logger.info(f"  故障开始时间: {item.get('ImpairedSince', 'N/A')}")
+                      if item.get('EBS_Detail_JSON'):
+                          logger.info(f"  EBS详情: {item['EBS_Detail_JSON']}")
+                      else:
+                          logger.info(f"  EBS详情: N/A")
+                      logger.info("-" * 60)
+                  
+                  # 保存到DynamoDB
+                  save_to_dynamodb(impaired_list)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'message': '检测完成',
+                          'region': region,
+                          'environment': ENVIRONMENT,
+                          'project_prefix': PROJECT_PREFIX,
+                          'timezone_offset': TIMEZONE_OFFSET,
+                          'detection_time': get_current_local_time(),
+                          'abnormal_instances_count': len(impaired_list),
+                          'abnormal_instances': impaired_list
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Lambda执行过程中发生错误: {e}", exc_info=True)
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({
+                          'error': str(e),
+                          'message': 'Lambda执行失败',
+                          'environment': ENVIRONMENT,
+                          'project_prefix': PROJECT_PREFIX,
+                          'timezone_offset': TIMEZONE_OFFSET
+                      })
+                  }
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-detection-lambda-${Environment}'
+        - Key: Purpose
+          Value: EC2AbnormalInstanceDetection
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ResourcePrefix
+
+  # CloudWatch Log Group
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ResourcePrefix}-detection-lambda-${Environment}'
+      RetentionInDays: !Ref LogRetentionDays
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-lambda-logs-${Environment}'
+        - Key: Purpose
+          Value: EC2AbnormalInstanceDetection
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ResourcePrefix
+
+  # EventBridge Rule
+  ScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${ResourcePrefix}-detection-schedule-${Environment}'
+      Description: !Sub 'Periodically trigger ${ResourcePrefix} EC2 abnormal instance detection Lambda function - ${Environment} environment'
+      ScheduleExpression: !Ref ScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt DetectionLambda.Arn
+          Id: !Sub '${ResourcePrefix}DetectionLambdaTarget'
+
+  # Lambda Permission - Allow EventBridge to invoke
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DetectionLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduleRule.Arn
+
+  # SQS Queue - Conditional creation
+  NotificationQueue:
+    Type: AWS::SQS::Queue
+    Condition: ShouldCreateSQS
+    Properties:
+      QueueName: !Sub '${ResourcePrefix}-abnormal-notifications-${Environment}'
+      VisibilityTimeout: 300
+      MessageRetentionPeriod: 1209600  # 14 days
+      ReceiveMessageWaitTimeSeconds: 20  # Long polling
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-abnormal-notifications-${Environment}'
+        - Key: Purpose
+          Value: EC2AbnormalInstanceNotification
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ResourcePrefix
+
+  # EventBridge Pipes IAM Role
+  EventBridgePipesRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ResourcePrefix}-pipes-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: pipes.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub '${ResourcePrefix}-pipes-policy-${Environment}'
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # DynamoDB Streams permissions
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: !GetAtt AbnormalInstancesTable.StreamArn
+              # SQS permissions
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                  - sqs:GetQueueAttributes
+                Resource: 
+                  - !If 
+                    - ShouldCreateSQS
+                    - !GetAtt NotificationQueue.Arn
+                    - !Ref ExistingSQSArn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ResourcePrefix}-pipes-role-${Environment}'
+        - Key: Purpose
+          Value: EC2AbnormalInstanceNotification
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ResourcePrefix
+
+  # EventBridge Pipe
+  DynamoDBToSQSPipe:
+    Type: AWS::Pipes::Pipe
+    Properties:
+      Name: !Sub '${ResourcePrefix}-ddb-to-sqs-pipe-${Environment}'
+      Description: !Sub 'Pipe to send DynamoDB new records to SQS - ${Environment}'
+      RoleArn: !GetAtt EventBridgePipesRole.Arn
+      Source: !GetAtt AbnormalInstancesTable.StreamArn
+      Target: !If 
+        - ShouldCreateSQS
+        - !GetAtt NotificationQueue.Arn
+        - !Ref ExistingSQSArn
+      SourceParameters:
+        FilterCriteria:
+          Filters:
+            - Pattern: '{"eventName": ["INSERT"]}'
+        DynamoDBStreamParameters:
+          StartingPosition: LATEST
+          BatchSize: 10
+          MaximumBatchingWindowInSeconds: 5
+      Tags:
+        Name: !Sub '${ResourcePrefix}-ddb-to-sqs-pipe-${Environment}'
+        Purpose: EC2AbnormalInstanceNotification
+        Environment: !Ref Environment
+        Project: !Ref ResourcePrefix
+
+Outputs:
+  ResourcePrefix:
+    Description: Resource name prefix
+    Value: !Ref ResourcePrefix
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-ResourcePrefix'
+
+  Environment:
+    Description: Deployment environment
+    Value: !Ref Environment
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-Environment'
+
+  TimezoneOffset:
+    Description: Timezone offset from UTC
+    Value: !Ref TimezoneOffset
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-TimezoneOffset'
+
+  DeploymentRegion:
+    Description: AWS region where the stack is deployed
+    Value: !Ref AWS::Region
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-DeploymentRegion'
+
+  DynamoDBTableName:
+    Description: DynamoDB table name
+    Value: !Ref AbnormalInstancesTable
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-TableName'
+
+  DynamoDBTableArn:
+    Description: DynamoDB table ARN
+    Value: !GetAtt AbnormalInstancesTable.Arn
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-TableArn'
+
+  LambdaFunctionName:
+    Description: Lambda function name
+    Value: !Ref DetectionLambda
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-LambdaName'
+
+  LambdaFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt DetectionLambda.Arn
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-LambdaArn'
+
+  EventBridgeRuleName:
+    Description: EventBridge rule name
+    Value: !Ref ScheduleRule
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-RuleName'
+
+  EventBridgeRuleArn:
+    Description: EventBridge rule ARN
+    Value: !GetAtt ScheduleRule.Arn
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-RuleArn'
+
+  IAMRoleName:
+    Description: IAM role name
+    Value: !Ref LambdaExecutionRole
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-RoleName'
+
+  IAMRoleArn:
+    Description: IAM role ARN
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-RoleArn'
+
+  StackInfo:
+    Description: Stack information summary
+    Value: !Sub 'Project: ${ResourcePrefix}, Environment: ${Environment}, Schedule: ${ScheduleExpression}, Timezone: UTC${TimezoneOffset}, Region: ${AWS::Region}'
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-StackInfo'
+
+  SQSQueueName:
+    Condition: ShouldCreateSQS
+    Description: SQS queue name for notifications
+    Value: !GetAtt NotificationQueue.QueueName
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-SQSQueueName'
+
+  SQSQueueArn:
+    Description: SQS queue ARN for notifications
+    Value: !If 
+      - ShouldCreateSQS
+      - !GetAtt NotificationQueue.Arn
+      - !Ref ExistingSQSArn
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-SQSQueueArn'
+
+  SQSQueueUrl:
+    Condition: ShouldCreateSQS
+    Description: SQS queue URL for notifications
+    Value: !Ref NotificationQueue
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-SQSQueueUrl'
+
+  EventBridgePipeName:
+    Description: EventBridge Pipe name
+    Value: !Ref DynamoDBToSQSPipe
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-PipeName'
+
+  EventBridgePipeArn:
+    Description: EventBridge Pipe ARN
+    Value: !GetAtt DynamoDBToSQSPipe.Arn
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-PipeArn'
+
+  DynamoDBStreamArn:
+    Description: DynamoDB Stream ARN
+    Value: !GetAtt AbnormalInstancesTable.StreamArn
+    Export:
+      Name: !Sub '${ResourcePrefix}-${Environment}-StreamArn'

@@ -51,8 +51,8 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/your-username/ec2-abnormal-detection.git
-cd ec2-abnormal-detection
+git clone git clone https://github.com/percy-han/AWS.git
+cd  AWS/Auto-detect-abnormal-instance/
 
 # 部署到 us-east-1，使用默认配置
 aws cloudformation create-stack \

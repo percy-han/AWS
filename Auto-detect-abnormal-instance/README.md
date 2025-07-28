@@ -47,7 +47,14 @@
   - IAM 角色创建权限
   - EC2、Lambda、DynamoDB、SQS、EventBridge 相关权限
 
-### 基本部署
+
+### 控制台部署
+
+在AWS cloud formation控制台上传ec2-abnormal-detection-cdk-github.yaml文件，填写对应的参数即可开始
+
+### CLI部署
+
+#### 基本部署
 
 ```bash
 # 克隆仓库
@@ -62,7 +69,7 @@ aws cloudformation create-stack \
   --region us-east-1
 ```
 
-### 自定义部署
+#### 自定义部署
 
 ```bash
 # 部署到指定区域，使用自定义配置

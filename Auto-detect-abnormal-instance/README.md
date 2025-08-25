@@ -185,6 +185,7 @@ aws cloudformation create-stack \
 - **StackInfo** - 完整的部署信息摘要
 
 ## 📋 SQS输出信息
+```
 {
     "eventID": "2b7ee51d27245e02dc7aa8537888a8c1",
     "eventName": "INSERT",
@@ -216,7 +217,9 @@ aws cloudformation create-stack \
     },
     "eventSourceARN": "arn:aws:dynamodb:us-west-2:123456789:table/ec2-abnormal-detection-abnormal-instances-prod/stream/2025-07-25T16:51:35.754"
 }
+```
 ==============================
+```
 {
   "eventID": "f5d4322f89f316557df2493a9e9c7be6",
   "eventName": "INSERT",
@@ -248,7 +251,18 @@ aws cloudformation create-stack \
   },
   "eventSourceARN": "arn:aws:dynamodb:us-west-2:123456789:table/ec2-abnormal-detection-abnormal-instances-prod/stream/2025-07-25T16:51:35.754"
 }
-
+```
+- **Keys** - DDB中的主键约束，用于过滤重复值
+- **EBS_Detail_JSON** - 实例故障时EBS的吞吐和IOPS监控状态，没有异常则为空值，如果多个EBS异常则返回多个值
+- **Fault_Type** - 实例故障类型:InstanceStatus,操作系统内部故障；SystemStatus，实例底层硬件故障。【注⚠️】在某些特定情况下会同时出现这两个状态都异常，此时需要开case联系AWS Support进行调查
+- **InstanceId** - 实例ID
+- **PrivateIP** - 实例的primary私有IP
+- **Hostname** - 主机名
+- **DetectionTime** - 脚本检测时间
+- **Environment** - 脚本部署时设置的脚本环境标识
+- **ImpairedSince** - 故障开始时间
+- **ProjectPrefix** - 脚本部署时指定的创建资源时的前缀
+- **TimezoneOffset** - 时区
 
 ## 🛠️ 故障排除
 

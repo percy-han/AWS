@@ -184,6 +184,72 @@ aws cloudformation create-stack \
 - **SQSQueueUrl** - 通知队列URL
 - **StackInfo** - 完整的部署信息摘要
 
+## 📋 SQS输出信息
+{
+    "eventID": "2b7ee51d27245e02dc7aa8537888a8c1",
+    "eventName": "INSERT",
+    "eventVersion": "1.1",
+    "eventSource": "aws:dynamodb",
+    "awsRegion": "us-west-2",
+    "dynamodb": {
+        "ApproximateCreationDateTime": 1756109278,
+        "Keys": {
+            "UniqueKey": {"S": "InstanceStatus#2025-08-25 16:03"},
+            "InstanceId": {"S": "i-00ccf0305826d8259"}
+        },
+        "NewImage": {
+            "EBS_Detail_JSON": {"S": ""},
+            "Fault_Type": {"S": "InstanceStatus"},
+            "InstanceId": {"S": "i-00ccf0305826d8259"},
+            "PrivateIP": {"S": "172.31.15.174"},
+            "UniqueKey": {"S": "InstanceStatus#2025-08-25 16:03"},
+            "Hostname": {"S": "mcp-server"},
+            "DetectionTime": {"S": "2025-08-25 16:07:58"},
+            "Environment": {"S": "prod"},
+            "ImpairedSince": {"S": "2025-08-25 16:03"},
+            "ProjectPrefix": {"S": "ec2-abnormal-detection"},
+            "TimezoneOffset": {"N": "8"}
+        },
+        "SequenceNumber": "143269700000765184156267077",
+        "SizeBytes": 344,
+        "StreamViewType": "NEW_AND_OLD_IMAGES"
+    },
+    "eventSourceARN": "arn:aws:dynamodb:us-west-2:123456789:table/ec2-abnormal-detection-abnormal-instances-prod/stream/2025-07-25T16:51:35.754"
+}
+==============================
+{
+  "eventID": "f5d4322f89f316557df2493a9e9c7be6",
+  "eventName": "INSERT",
+  "eventVersion": "1.1",
+  "eventSource": "aws:dynamodb",
+  "awsRegion": "us-west-2",
+  "dynamodb": {
+    "ApproximateCreationDateTime": 1756116774,
+    "Keys": {
+      "UniqueKey": {"S": "InstanceStatus#2025-08-25 18:09"},
+      "InstanceId": {"S": "i-0b98c2c6e043ad820"}
+    },
+    "NewImage": {
+      "EBS_Detail_JSON": {"S": "[{\"VolumeId\": \"vol-06b3eb237207e82bd\", \"DeviceName\": \"/dev/xvda\", \"EBS_IOPS_Exceeded\": false, \"EBS_Throughput_Exceeded\": true}, {\"VolumeId\": \"vol-05bc3c9eb878b9478\", \"DeviceName\": \"/dev/sdb\", \"EBS_IOPS_Exceeded\": false, \"EBS_Throughput_Exceeded\": true}]"},
+      "Fault_Type": {"S": "InstanceStatus"},
+      "InstanceId": {"S": "i-0b98c2c6e043ad820"},
+      "PrivateIP": {"S": "172.31.6.214"},
+      "UniqueKey": {"S": "InstanceStatus#2025-08-25 18:09"},
+      "Hostname": {"S": "test"},
+      "DetectionTime": {"S": "2025-08-25 18:12:54"},
+      "Environment": {"S": "prod"},
+      "ImpairedSince": {"S": "2025-08-25 18:09"},
+      "ProjectPrefix": {"S": "ec2-abnormal-detection"},
+      "TimezoneOffset": {"N": "8"}
+    },
+    "SequenceNumber": "143670400004324667581570865",
+    "SizeBytes": 590,
+    "StreamViewType": "NEW_AND_OLD_IMAGES"
+  },
+  "eventSourceARN": "arn:aws:dynamodb:us-west-2:123456789:table/ec2-abnormal-detection-abnormal-instances-prod/stream/2025-07-25T16:51:35.754"
+}
+
+
 ## 🛠️ 故障排除
 
 ### 常见问题
